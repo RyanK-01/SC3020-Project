@@ -263,13 +263,11 @@ def get_postgres_plan(conn, query: str, schema: str = "public") -> PlanNode:
             cur.execute("SET search_path TO " + quote_ident(schema, cur))
             cur.execute("EXPLAIN (FORMAT JSON) " + query)
             raw = cur.fetchone()[0]
+        return plan_from_explain_json(raw)
     except psycopg2.Error as exc:
         raise RuntimeError(f"PostgreSQL rejected the query: {exc}") from exc
     finally:
         conn.rollback()  # leave the connection clean after an error
-    if isinstance(raw, str):  # psycopg2 usually decodes the JSON already
-        raw = json.loads(raw)
-    return plan_from_explain_json(raw), json.dumps(raw, indent=2)
 
 
 # ---------------------------------------------------------------------------
@@ -375,15 +373,9 @@ def get_llm_plan(query: str, schema: dict, api_key: Optional[str] = None) -> tup
     prompt = build_prompt(query, schema_to_text(schema))
     reply = None
     try:
-        reply = ask_llm(prompt, api_key)
-        try:
-            plan = plan_from_explain_json(extract_json(reply))
-        except (AttributeError, KeyError, TypeError, IndexError) as exc:
-            raise LLMError(f"Could not interpret the LLM plan structure: {exc}") from exc
-    except LLMError as exc:
-        exc.prompt, exc.reply = prompt, reply
-        raise
-    return plan, prompt, reply
+        return plan_from_explain_json(extract_json(reply))
+    except (AttributeError, KeyError, TypeError, IndexError) as exc:
+        raise LLMError(f"Could not interpret the LLM plan structure: {exc}") from exc
 
 
 # ---------------------------------------------------------------------------
