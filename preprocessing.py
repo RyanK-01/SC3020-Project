@@ -263,19 +263,24 @@ def get_postgres_plan(conn, query: str, schema: str = "public") -> PlanNode:
             cur.execute("SET search_path TO " + quote_ident(schema, cur))
             cur.execute("EXPLAIN (FORMAT JSON) " + query)
             raw = cur.fetchone()[0]
-        return plan_from_explain_json(raw)
     except psycopg2.Error as exc:
         raise RuntimeError(f"PostgreSQL rejected the query: {exc}") from exc
     finally:
-        conn.rollback()  # end the transaction so the connection is usable after an error
+        conn.rollback()  # leave the connection clean after an error
+    if isinstance(raw, str):  # psycopg2 usually decodes the JSON already
+        raw = json.loads(raw)
+    return plan_from_explain_json(raw), json.dumps(raw, indent=2)
 
 
 # ---------------------------------------------------------------------------
 # 5. LLM access (Google Gemini REST API)
 # ---------------------------------------------------------------------------
 class LLMError(RuntimeError):
-    """Raised when the LLM cannot be called or its reply cannot be used."""
-    pass
+    """
+    Raised when the LLM cannot be called or its reply cannot be used.
+    """
+    prompt: Optional[str] = None
+    reply: Optional[str] = None
 
 
 PROMPT_TEMPLATE = """You are a PostgreSQL query optimizer. Predict the query execution plan
@@ -363,15 +368,22 @@ def extract_json(text: str):
         raise LLMError(f"The LLM reply was not valid JSON: {exc}") from exc
 
 
-def get_llm_plan(query: str, schema: dict, api_key: Optional[str] = None) -> PlanNode:
+def get_llm_plan(query: str, schema: dict, api_key: Optional[str] = None) -> tuple:
     """
     Ask the LLM to predict the execution plan of a query.
     """
-    reply = ask_llm(build_prompt(query, schema_to_text(schema)), api_key)
+    prompt = build_prompt(query, schema_to_text(schema))
+    reply = None
     try:
-        return plan_from_explain_json(extract_json(reply))
-    except (AttributeError, KeyError, TypeError, IndexError) as exc:
-        raise LLMError(f"Could not interpret the LLM plan structure: {exc}") from exc
+        reply = ask_llm(prompt, api_key)
+        try:
+            plan = plan_from_explain_json(extract_json(reply))
+        except (AttributeError, KeyError, TypeError, IndexError) as exc:
+            raise LLMError(f"Could not interpret the LLM plan structure: {exc}") from exc
+    except LLMError as exc:
+        exc.prompt, exc.reply = prompt, reply
+        raise
+    return plan, prompt, reply
 
 
 # ---------------------------------------------------------------------------
