@@ -31,13 +31,6 @@ STATUS_COLORS = {
 LEGEND = [("unchanged", "Same in both"), ("changed", "Different operator"),
           ("missing", "Only in PostgreSQL"), ("extra", "Only in AI plan")]
 
-# Raw data the user can inspect: key in App.raw -> button / window title
-RAW_VIEWS = {
-    "explain": "View EXPLAIN output",
-    "prompt":  "View LLM prompt",
-    "reply":   "View LLM response",
-}
-
 BOX_W, BOX_H = 150, 52
 X_GAP, Y_GAP = 170, 90
 MARGIN = 20
@@ -105,8 +98,6 @@ class App:
         root.geometry("1200x800")
         self.results = queue.Queue()
         self.fields: dict = {}
-        self.raw: dict = {}                           # last EXPLAIN output / prompt / reply
-        self.raw_buttons: dict = {}
         self._build_widgets()
 
     # ---- widgets ----------------------------------------------------------
@@ -135,13 +126,6 @@ class App:
         self.compare_button.pack(side="left")
         ttk.Button(buttons, text="Load demo plans (no DB / LLM)",
                    command=self.on_demo).pack(side="left", padx=6)
-        ttk.Separator(buttons, orient="vertical").pack(side="left", fill="y", padx=6)
-        for key, title in RAW_VIEWS.items():
-            button = ttk.Button(buttons, text=title,
-                                command=lambda k=key: self.show_raw(k))
-            button.pack(side="left", padx=2)
-            button.state(["disabled"])                # enabled once there is data
-            self.raw_buttons[key] = button
         self.status_var = tk.StringVar(value="Ready.")
         ttk.Label(buttons, textvariable=self.status_var).pack(side="left", padx=12)
 
@@ -178,7 +162,6 @@ class App:
     # ---- actions ----------------------------------------------------------
     def on_demo(self):
         pg, llm = pp.sample_plans()
-        self._set_raw({})                             # demo plans have no raw DB / LLM data
         self.show(pg, llm, comparison.compare_plans(pg, llm))
         self.status_var.set("Showing built-in demo plans.")
 
@@ -196,23 +179,18 @@ class App:
     def _worker(self, query, values):
         """Runs in a background thread - must not touch any widget."""
         conn = None
-        # Raw intermediate data, kept even if a later step fails
-        raw = {"explain": None, "prompt": None, "reply": None}
         try:
             cfg = pp.DBConfig(host=values["host"], port=values["port"],
                               dbname=values["dbname"], user=values["user"],
                               password=values["password"], schema=values["schema"])
             conn = pp.connect_db(cfg)
             schema = pp.get_schema(conn, cfg.schema)
-            pg_plan, raw["explain"] = pp.get_postgres_plan(conn, query, cfg.schema)
-            llm_plan, raw["prompt"], raw["reply"] = pp.get_llm_plan(
-                query, schema, values["api_key"] or None)
+            pg_plan = pp.get_postgres_plan(conn, query, cfg.schema)
+            llm_plan = pp.get_llm_plan(query, schema, values["api_key"] or None)
             result = comparison.compare_plans(pg_plan, llm_plan)
-            self.results.put(("ok", raw, pg_plan, llm_plan, result))
+            self.results.put(("ok", pg_plan, llm_plan, result))
         except Exception as exc:                      # shown to the user, not swallowed
-            if isinstance(exc, pp.LLMError):          # keep the prompt / reply for inspection
-                raw["prompt"], raw["reply"] = exc.prompt, exc.reply
-            self.results.put(("error", raw, str(exc)))
+            self.results.put(("error", str(exc)))
         finally:
             if conn is not None:
                 conn.close()
@@ -225,51 +203,11 @@ class App:
             return
         self.compare_button.state(["!disabled"])
         if message[0] == "error":
-            _, raw, error = message
-            self._set_raw(raw)
-            self.status_var.set("Error: " + error)
+            self.status_var.set("Error: " + message[1])
         else:
-            _, raw, pg, llm, result = message
-            self._set_raw(raw)
+            _, pg, llm, result = message
             self.show(pg, llm, result)
             self.status_var.set("Done.")
-
-    # ---- raw data viewers -------------------------------------------------
-    def _set_raw(self, raw):
-        """Store the raw data and enable only the buttons that have something to show."""
-        self.raw = dict(raw)
-        for key, button in self.raw_buttons.items():
-            button.state(["!disabled"] if self.raw.get(key) else ["disabled"])
-
-    def show_raw(self, key):
-        title = RAW_VIEWS[key]
-        text = self.raw.get(key)
-        if not text:
-            self.status_var.set(f"No {title.lower()} available yet.")
-            return
-        win = tk.Toplevel(self.root)
-        win.title(title)
-        win.geometry("800x600")
-        bar = ttk.Frame(win)
-        bar.pack(fill="x", padx=4, pady=4)
-
-        def copy():
-            self.root.clipboard_clear()
-            self.root.clipboard_append(text)
-
-        ttk.Button(bar, text="Copy to clipboard", command=copy).pack(side="left")
-        ttk.Button(bar, text="Close", command=win.destroy).pack(side="right")
-        frame = ttk.Frame(win)
-        frame.pack(fill="both", expand=True, padx=4, pady=(0, 4))
-        box = tk.Text(frame, wrap="none", font=("Consolas", 10))
-        ybar = ttk.Scrollbar(frame, orient="vertical", command=box.yview)
-        xbar = ttk.Scrollbar(frame, orient="horizontal", command=box.xview)
-        box.configure(yscrollcommand=ybar.set, xscrollcommand=xbar.set)
-        xbar.pack(side="bottom", fill="x")
-        ybar.pack(side="right", fill="y")
-        box.pack(fill="both", expand=True)
-        box.insert("1.0", text)
-        box.configure(state="disabled")
 
     def show(self, pg_plan, llm_plan, result):
         draw_tree(self.pg_canvas, pg_plan)

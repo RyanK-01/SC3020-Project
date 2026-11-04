@@ -232,12 +232,8 @@ def schema_to_text(schema: dict) -> str:
     return "\n".join(lines)
 
 
-def get_postgres_plan(conn, query: str, schema: str = "public") -> tuple:
-    """
-    Run EXPLAIN (FORMAT JSON) - the query itself is NOT executed.
-    Returns (plan, raw_text): the PlanNode tree and the EXPLAIN output as
-    pretty-printed JSON text.
-    """
+def get_postgres_plan(conn, query: str, schema: str = "public") -> PlanNode:
+    """Run EXPLAIN (FORMAT JSON) - the query itself is NOT executed."""
     import psycopg2
     from psycopg2.extensions import quote_ident
     query = query.strip().rstrip(";")
@@ -248,25 +244,18 @@ def get_postgres_plan(conn, query: str, schema: str = "public") -> tuple:
             cur.execute("SET search_path TO " + quote_ident(schema, cur))
             cur.execute("EXPLAIN (FORMAT JSON) " + query)
             raw = cur.fetchone()[0]
+        return plan_from_explain_json(raw)
     except psycopg2.Error as exc:
         raise RuntimeError(f"PostgreSQL rejected the query: {exc}") from exc
     finally:
         conn.rollback()  # leave the connection clean after an error
-    if isinstance(raw, str):  # psycopg2 usually decodes the JSON already
-        raw = json.loads(raw)
-    return plan_from_explain_json(raw), json.dumps(raw, indent=2)
 
 
 # ---------------------------------------------------------------------------
 # 5. LLM access (default backend: Google Gemini REST API)
 # ---------------------------------------------------------------------------
 class LLMError(RuntimeError):
-    """
-    get_llm_plan fills in .prompt and .reply (None if that step was never
-    reached), so the caller can still show them when the LLM step fails.
-    """
-    prompt: Optional[str] = None
-    reply: Optional[str] = None
+    pass
 
 
 PROMPT_TEMPLATE = """You are a PostgreSQL query optimizer. Predict the query execution plan
@@ -350,24 +339,13 @@ def extract_json(text: str):
         raise LLMError(f"The LLM reply was not valid JSON: {exc}") from exc
 
 
-def get_llm_plan(query: str, schema: dict, api_key: Optional[str] = None) -> tuple:
-    """
-    Ask the LLM for a plan and convert the answer into a PlanNode tree.
-    Returns (plan, prompt, reply): the tree, the exact prompt sent and the raw
-    reply text. On failure the LLMError carries .prompt and .reply instead.
-    """
-    prompt = build_prompt(query, schema_to_text(schema))
-    reply = None
+def get_llm_plan(query: str, schema: dict, api_key: Optional[str] = None) -> PlanNode:
+    """Ask the LLM for a plan and convert the answer into a PlanNode tree."""
+    reply = ask_llm(build_prompt(query, schema_to_text(schema)), api_key)
     try:
-        reply = ask_llm(prompt, api_key)
-        try:
-            plan = plan_from_explain_json(extract_json(reply))
-        except (AttributeError, KeyError, TypeError, IndexError) as exc:
-            raise LLMError(f"Could not interpret the LLM plan structure: {exc}") from exc
-    except LLMError as exc:
-        exc.prompt, exc.reply = prompt, reply
-        raise
-    return plan, prompt, reply
+        return plan_from_explain_json(extract_json(reply))
+    except (AttributeError, KeyError, TypeError, IndexError) as exc:
+        raise LLMError(f"Could not interpret the LLM plan structure: {exc}") from exc
 
 
 # ---------------------------------------------------------------------------
