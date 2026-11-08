@@ -29,6 +29,13 @@ import urllib.request
 from dataclasses import dataclass, field
 from typing import Iterator, Optional
 
+# ---------------------------------------------------------------------------
+# 0. Load .env variables, initialise default values
+# ---------------------------------------------------------------------------
+import dotenv
+dotenv.load_dotenv()
+
+DEFAULT_GEMINI_MODEL = "gemini-3.1-flash-lite"
 
 # ---------------------------------------------------------------------------
 # 1. PlanNode  (SHARED INTERFACE - agree before changing field names)
@@ -39,11 +46,16 @@ class PlanNode:
     relation: Optional[str] = None      # table name for scans
     index_name: Optional[str] = None    # index used by Index (Only) Scan
     join_type: Optional[str] = None     # "Inner", "Left", ...
-    conditions: Optional[str] = None    # filter / join condition text
+    conditions: Optional[str] = None    # filter / join condition text (all keys, for display)
     children: list = field(default_factory=list)
 
+    # Condition text split by purpose, used by comparison.py
+    selection: Optional[str] = None     # Filter / Index Cond / Recheck Cond (scan predicates)
+    join_cond: Optional[str] = None     # Hash Cond / Merge Cond / Join Filter / Condition
+    partial_mode: Optional[str] = None  # "Partial" / "Finalize" for parallel aggregates
+
     # Filled in by comparison.py, read by interface.py
-    status: str = "unchanged"           # unchanged | changed | missing | extra
+    status: str = "unchanged"           # unchanged | changed | missing | extra | ignored
     note: str = ""                      # short explanation for this node
 
     def walk(self) -> Iterator["PlanNode"]:
@@ -122,6 +134,11 @@ def normalize_node_type(name: str) -> str:
 # ---------------------------------------------------------------------------
 _CONDITION_KEYS = ("Hash Cond", "Merge Cond", "Join Filter", "Index Cond",
                    "Recheck Cond", "Filter", "Condition")
+_SELECTION_KEYS = ("Filter", "Index Cond", "Recheck Cond")   # predicates on a scan
+_JOIN_KEYS = ("Hash Cond", "Merge Cond", "Join Filter", "Condition")
+# On a join node "Filter" is an extra non-join predicate; on a scan node
+# "Condition" (what the LLM may write) is treated as a join/selection text by
+# comparison.py, which sorts predicates by how many columns they mention.
 
 
 def plan_from_dict(d: dict) -> PlanNode:
@@ -137,6 +154,8 @@ def plan_from_dict(d: dict) -> PlanNode:
             node_type = "GroupAggregate"
 
     conditions = [f"{k}: {d[k]}" for k in _CONDITION_KEYS if d.get(k)]
+    selection = " AND ".join(str(d[k]) for k in _SELECTION_KEYS if d.get(k))
+    join_cond = " AND ".join(str(d[k]) for k in _JOIN_KEYS if d.get(k))
     return PlanNode(
         node_type=node_type,
         relation=d.get("Relation Name"),
@@ -144,6 +163,9 @@ def plan_from_dict(d: dict) -> PlanNode:
         join_type=d.get("Join Type"),
         conditions="; ".join(conditions) or None,
         children=[plan_from_dict(c) for c in d.get("Plans", [])],
+        selection=selection or None,
+        join_cond=join_cond or None,
+        partial_mode=d.get("Partial Mode"),
     )
 
 
@@ -259,7 +281,8 @@ class LLMError(RuntimeError):
 
 
 PROMPT_TEMPLATE = """You are a PostgreSQL query optimizer. Predict the query execution plan
-PostgreSQL would choose for the query below, as EXPLAIN (FORMAT JSON) would show it.
+PostgreSQL would choose for the query below. The output is to be in the same format as 
+how "EXPLAIN (FORMAT JSON)" would show it.
 
 {schema}
 
@@ -274,6 +297,9 @@ Rules:
   Bitmap Heap Scan, Hash Join, Merge Join, Nested Loop, Hash, Sort,
   Aggregate, HashAggregate, GroupAggregate, Limit, Gather, Materialize, ...
 - "Relation Name" is the real table name and appears on scan nodes only.
+- On scan nodes put the WHERE predicates applied to that table in "Filter"
+  (or "Index Cond" for an index lookup). On join nodes put the join
+  predicate in "Hash Cond", "Merge Cond" or "Condition".
 - Omit keys that do not apply. Do not include costs or row counts.
 - A Hash Join has two children: the probe side first, then a Hash node
   whose single child is the build side.
@@ -282,7 +308,6 @@ Rules:
 
 def build_prompt(query: str, schema_text: str) -> str:
     return PROMPT_TEMPLATE.format(schema=schema_text, query=query.strip())
-
 
 def ask_llm(prompt: str, api_key: Optional[str] = None) -> str:
     """
@@ -295,7 +320,7 @@ def ask_llm(prompt: str, api_key: Optional[str] = None) -> str:
     if not api_key:
         raise LLMError("No API key. Set the GEMINI_API_KEY environment variable "
                        "or paste a key into the GUI.")
-    model = os.environ.get("GEMINI_MODEL", "gemini-2.5-flash")  # check current model names
+    model = os.environ.get("GEMINI_MODEL", DEFAULT_GEMINI_MODEL)
 
     cache_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".llm_cache")
     cache_file = os.path.join(
@@ -315,7 +340,11 @@ def ask_llm(prompt: str, api_key: Optional[str] = None) -> str:
     try:
         with urllib.request.urlopen(request, timeout=90) as response:
             payload = json.load(response)
-        text = payload["candidates"][0]["content"]["parts"][0]["text"]
+        parts = payload["candidates"][0]["content"]["parts"]
+        # skip "thought" parts some models return before the answer
+        text = "".join(p.get("text", "") for p in parts if not p.get("thought"))
+        if not text:
+            raise KeyError("no text in the model reply")
     except urllib.error.HTTPError as exc:
         raise LLMError(f"LLM API returned HTTP {exc.code}: {exc.read().decode(errors='replace')[:300]}") from exc
     except (urllib.error.URLError, KeyError, IndexError, ValueError) as exc:
@@ -354,19 +383,23 @@ def get_llm_plan(query: str, schema: dict, api_key: Optional[str] = None) -> Pla
 # ---------------------------------------------------------------------------
 def sample_plans():
     """Return (postgres_plan, llm_plan) for a lineitem/part join."""
-    pg = {"Node Type": "Aggregate", "Strategy": "Plain", "Plans": [
+    pg = {"Node Type": "Aggregate", "Strategy": "Plain", "Partial Mode": "Finalize",
+          "Plans": [
         {"Node Type": "Gather", "Plans": [
-            {"Node Type": "Aggregate", "Strategy": "Plain", "Plans": [
+            {"Node Type": "Aggregate", "Strategy": "Plain", "Partial Mode": "Partial",
+             "Plans": [
                 {"Node Type": "Hash Join", "Join Type": "Inner",
                  "Hash Cond": "(l_partkey = p_partkey)", "Plans": [
-                    {"Node Type": "Seq Scan", "Relation Name": "lineitem"},
+                    {"Node Type": "Seq Scan", "Relation Name": "lineitem",
+                     "Filter": "(l_shipdate >= '1993-11-01'::date)"},
                     {"Node Type": "Hash", "Plans": [
                         {"Node Type": "Seq Scan", "Relation Name": "part"}]}]}]}]}]}
     llm = {"Node Type": "Aggregate", "Strategy": "Plain", "Plans": [
         {"Node Type": "Hash Join", "Join Type": "Inner",
          "Condition": "l_partkey = p_partkey", "Plans": [
             {"Node Type": "Index Scan", "Relation Name": "lineitem",
-             "Index Name": "idx_lineitem_partkey"},
+             "Index Name": "idx_lineitem_shipdate",
+             "Index Cond": "l_shipdate >= '1993-11-01'"},
             {"Node Type": "Hash", "Plans": [
                 {"Node Type": "Seq Scan", "Relation Name": "part"}]}]}]}
     return plan_from_dict(pg), plan_from_dict(llm)

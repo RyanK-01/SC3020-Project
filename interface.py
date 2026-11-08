@@ -27,12 +27,14 @@ STATUS_COLORS = {
     "changed":   "#ffe0b2",   # orange - same piece of work, different operator
     "missing":   "#ffcdd2",   # red    - only in PostgreSQL's plan
     "extra":     "#bbdefb",   # blue   - only in the AI plan
+    "ignored":   "#eeeeee",   # grey   - helper / parallel node, not compared
 }
 LEGEND = [("unchanged", "Same in both"), ("changed", "Different operator"),
-          ("missing", "Only in PostgreSQL"), ("extra", "Only in AI plan")]
+          ("missing", "Only in PostgreSQL"), ("extra", "Only in AI plan"),
+          ("ignored", "Not compared (Hash / Gather)")]
 
 BOX_W, BOX_H = 150, 52
-X_GAP, Y_GAP = 170, 90
+X_GAP, Y_GAP = 170, 76
 MARGIN = 20
 
 
@@ -95,7 +97,7 @@ class App:
     def __init__(self, root: tk.Tk):
         self.root = root
         root.title("Query Plan Comparison: PostgreSQL vs AI")
-        root.geometry("1200x800")
+        root.geometry("1300x900")
         self.results = queue.Queue()
         self.fields: dict = {}
         self._build_widgets()
@@ -118,7 +120,7 @@ class App:
 
         qframe = ttk.LabelFrame(self.root, text="SQL query")
         qframe.pack(fill="x", padx=8, pady=4)
-        self.query_text = tk.Text(qframe, height=6, font=("Consolas", 10))
+        self.query_text = tk.Text(qframe, height=4, font=("Consolas", 10))
         self.query_text.pack(fill="x", padx=4, pady=4)
         buttons = ttk.Frame(qframe)
         buttons.pack(fill="x", padx=4, pady=(0, 4))
@@ -144,7 +146,7 @@ class App:
         dframe.pack(fill="x", padx=8, pady=4)
         self.rate_var = tk.StringVar(value="Difference rate: -")
         ttk.Label(dframe, textvariable=self.rate_var).pack(anchor="w", padx=4)
-        self.diff_text = tk.Text(dframe, height=9, wrap="word", state="disabled")
+        self.diff_text = tk.Text(dframe, height=7, wrap="word", state="disabled")
         self.diff_text.pack(fill="x", padx=4, pady=4)
 
     def _make_canvas(self, panes, title):
@@ -157,6 +159,11 @@ class App:
         xbar.pack(side="bottom", fill="x")
         ybar.pack(side="right", fill="y")
         canvas.pack(fill="both", expand=True)
+        # mouse wheel scrolls (Shift + wheel scrolls sideways)
+        canvas.bind("<MouseWheel>", lambda e: canvas.yview_scroll(-1 * (e.delta // 120 or (1 if e.delta > 0 else -1)), "units"))
+        canvas.bind("<Shift-MouseWheel>", lambda e: canvas.xview_scroll(-1 * (e.delta // 120 or (1 if e.delta > 0 else -1)), "units"))
+        canvas.bind("<Button-4>", lambda e: canvas.yview_scroll(-1, "units"))   # Linux
+        canvas.bind("<Button-5>", lambda e: canvas.yview_scroll(1, "units"))
         return canvas
 
     # ---- actions ----------------------------------------------------------
