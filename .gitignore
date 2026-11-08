@@ -5,6 +5,7 @@
 
 # Cached LLM replies (local only, regenerated on demand)
 .llm_cache/
+claude.md
 
 # Python
 __pycache__/

@@ -4,6 +4,7 @@ import os
 import queue
 import threading
 import tkinter as tk
+from tkinter import font as tkfont
 from tkinter import ttk
 
 import comparison
@@ -90,7 +91,7 @@ def draw_tree(canvas: tk.Canvas, root) -> None:
         canvas.create_rectangle(x - BOX_W / 2, y - BOX_H / 2, x + BOX_W / 2, y + BOX_H / 2,
                                 fill=STATUS_COLORS.get(node.status, "white"), outline="#444")
         canvas.create_text(x, y, text=node.label(), width=BOX_W - 8, justify="center",
-                           font=("Segoe UI", 9))
+                           font="TkTextFont")
 
     canvas.configure(scrollregion=canvas.bbox("all"))
 
@@ -132,12 +133,24 @@ class App:
             ttk.Entry(top, textvariable=var, width=11, show=show).grid(row=0, column=2 * i + 1)
             self.fields[name] = var
 
-        qframe = ttk.LabelFrame(self.root, text="SQL query")
-        qframe.pack(fill="x", padx=8, pady=4)
-        self.query_text = tk.Text(qframe, height=4, font=("Consolas", 10))
-        self.query_text.pack(fill="x", padx=4, pady=4)
+        # The query box and the plan area share a vertical PanedWindow, so the
+        # sash between them can be dragged to make the query box taller/shorter.
+        # The classic tk.PanedWindow is used (not ttk) because it supports a
+        # per-pane minsize, which stops either pane being dragged shut.
+        vpanes = tk.PanedWindow(self.root, orient="vertical", sashwidth=6,
+                                sashrelief="raised", showhandle=False, borderwidth=0)
+        vpanes.pack(fill="both", expand=True, padx=8, pady=4)
+
+        qframe = ttk.LabelFrame(vpanes, text="SQL Query (drag the bar below to resize)")
         buttons = ttk.Frame(qframe)
-        buttons.pack(fill="x", padx=4, pady=(0, 4))
+        buttons.pack(side="bottom", fill="x", padx=4, pady=(0, 4))   # stays visible when shrunk
+        qbox = ttk.Frame(qframe)
+        qbox.pack(fill="both", expand=True, padx=4, pady=4)
+        self.query_text = tk.Text(qbox, height=6, font="TkFixedFont", undo=True)
+        qbar = ttk.Scrollbar(qbox, orient="vertical", command=self.query_text.yview)
+        self.query_text.configure(yscrollcommand=qbar.set)
+        qbar.pack(side="right", fill="y")
+        self.query_text.pack(fill="both", expand=True)
         self.compare_button = ttk.Button(buttons, text="Compare", command=self.on_compare)
         self.compare_button.pack(side="left")
         ttk.Button(buttons, text="Load demo plans (no DB / LLM)",
@@ -152,16 +165,27 @@ class App:
         self.status_var = tk.StringVar(value="Ready.")
         ttk.Label(buttons, textvariable=self.status_var).pack(side="left", padx=12)
 
-        legend = ttk.Frame(self.root)
-        legend.pack(fill="x", padx=8)
+        plan_area = ttk.Frame(vpanes)
+        legend = ttk.Frame(plan_area)
+        legend.pack(fill="x", pady=(4, 0))
         for status, text in LEGEND:
             tk.Label(legend, text=f" {text} ", bg=STATUS_COLORS[status],
                      relief="solid", borderwidth=1).pack(side="left", padx=4, pady=2)
 
-        panes = ttk.PanedWindow(self.root, orient="horizontal")
-        panes.pack(fill="both", expand=True, padx=8, pady=4)
+        panes = ttk.PanedWindow(plan_area, orient="horizontal")
+        panes.pack(fill="both", expand=True, pady=(4, 0))
         self.pg_canvas = self._make_canvas(panes, "PostgreSQL plan")
         self.llm_canvas = self._make_canvas(panes, "AI plan")
+
+        # Minimum heights: the query pane keeps its buttons plus a few lines of
+        # text visible; the plan pane keeps a usable strip of diagram visible.
+        self.root.update_idletasks()
+        line = tkfont.nametofont("TkFixedFont").metrics("linespace")
+        query_min = buttons.winfo_reqheight() + 5 * line + 40   # + frame label/padding
+        plan_min = legend.winfo_reqheight() + 180
+        vpanes.add(qframe, minsize=query_min, stretch="never")
+        vpanes.add(plan_area, minsize=plan_min, stretch="always")
+        self._vpanes_min = query_min + plan_min + 6             # + sash width
 
         dframe = ttk.LabelFrame(self.root, text="Differences")
         dframe.pack(fill="x", padx=8, pady=4)
@@ -169,6 +193,11 @@ class App:
         ttk.Label(dframe, textvariable=self.rate_var).pack(anchor="w", padx=4)
         self.diff_text = tk.Text(dframe, height=7, wrap="word", state="disabled")
         self.diff_text.pack(fill="x", padx=4, pady=4)
+
+        # Stop the window itself being shrunk so far that a pane gets squashed.
+        self.root.update_idletasks()
+        others = self.root.winfo_reqheight() - vpanes.winfo_reqheight()
+        self.root.minsize(600, others + self._vpanes_min)
 
     def _make_canvas(self, panes, title):
         """
@@ -287,7 +316,7 @@ class App:
         ttk.Button(bar, text="Close", command=win.destroy).pack(side="right")
         frame = ttk.Frame(win)
         frame.pack(fill="both", expand=True, padx=4, pady=(0, 4))
-        box = tk.Text(frame, wrap="none", font=("Consolas", 10))
+        box = tk.Text(frame, wrap="none", font="TkFixedFont")
         ybar = ttk.Scrollbar(frame, orient="vertical", command=box.yview)
         xbar = ttk.Scrollbar(frame, orient="horizontal", command=box.xview)
         box.configure(yscrollcommand=ybar.set, xscrollcommand=xbar.set)
