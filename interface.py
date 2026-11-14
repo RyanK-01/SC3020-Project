@@ -19,9 +19,13 @@ STATUS_COLORS = {
     "extra":     "#bbdefb",   # blue   - only in the AI plan
     "ignored":   "#eeeeee",   # grey   - helper / parallel node, not compared
 }
-LEGEND = [("unchanged", "Same in both"), ("changed", "Different operator"),
-          ("missing", "Only in PostgreSQL"), ("extra", "Only in AI plan"),
-          ("ignored", "Not compared (Hash / Gather)")]
+LEGEND = [
+    ("unchanged", "Same in both"), 
+    ("changed", "Different operator"),
+    ("missing", "Only in PostgreSQL"), 
+    ("extra", "Only in AI plan"),
+    ("ignored", "Not compared (Hash / Gather)")
+]
 
 # Raw data the user can inspect: key in App.raw -> button / window title
 RAW_VIEWS = {
@@ -30,21 +34,19 @@ RAW_VIEWS = {
     "reply":   "View LLM response",
 }
 
-# Tree drawing sizes, in pixels. Box heights grow to fit the node's text, and
-# every row of the tree is as tall as its tallest box.
+# tree drawing sizes in pixels; box heights grow to fit the node's text
 BOX_W = 200
 X_GAP = 210          # horizontal distance between neighbouring leaf columns
 ROW_GAP = 28         # vertical space between the bottom of a row and the next row
 BOX_PAD = 6          # padding between a box's border and its text
 MARGIN = 20
-MAX_COND_CHARS = 90  # longer condition text is cut off with "..."
+MAX_COND_CHARS = 90  # max num of chars displayed in condition text
 
 HEADER_FONT = ("TkTextFont", 9, "bold")
 DETAIL_FONT = ("TkTextFont", 8)
 
 # Splits PlanNode.conditions ("Hash Cond: x; Filter: y") back into its parts
-_COND_SPLIT = re.compile(
-    r"; (?=(?:" + "|".join(re.escape(k) for k in pp._CONDITION_KEYS) + r"): )")
+_COND_SPLIT = re.compile(r"; (?=(?:" + "|".join(re.escape(k) for k in pp._CONDITION_KEYS) + r"): )")
 # PostgreSQL type casts such as ::date, ::text or ::timestamp without time zone
 _CAST = re.compile(r"::(?:timestamp|time)(?: with(?:out)? time zone)?"
                    r"|::(?:character varying|double precision)"
@@ -54,10 +56,7 @@ _CAST = re.compile(r"::(?:timestamp|time)(?: with(?:out)? time zone)?"
 # Tree layout and drawing
 # ---------------------------------------------------------------------------
 def condition_lines(node) -> list:
-    """
-    Build the "key: condition" lines shown under a node's name: the filter,
-    index, join (hash / merge) and sort conditions that apply to it.
-    """
+    """ build the "key: condition" lines shown under a node's name """
     lines = []
     if node.conditions:
         for part in _COND_SPLIT.split(node.conditions):
@@ -68,19 +67,14 @@ def condition_lines(node) -> list:
 
     result = []
     for key, value in lines:
-        value = _CAST.sub("", value).strip()        # casts only add clutter in a small box
+        value = _CAST.sub("", value).strip()        # remove psql's type casts
         if len(value) > MAX_COND_CHARS:
-            value = value[:MAX_COND_CHARS - 3].rstrip() + "..."
+            value = value[:MAX_COND_CHARS - 3].rstrip() + "..."     # cut-off excess chars with "..."
         result.append(f"{key}: {value}")
     return result
 
 def layout_tree(root) -> dict:
-    """
-    Compute a grid position for every node of a plan tree.
-
-    Leaves are placed in consecutive columns from left to right, and each
-    parent is centred above its children.
-    """
+    """ computes a grid position for every node of a plan tree. """
     positions: dict = {}
     next_column = [0]
 
@@ -101,9 +95,7 @@ def layout_tree(root) -> dict:
     return positions
 
 def draw_tree(canvas: tk.Canvas, root) -> None:
-    """
-    Draw a plan tree on a canvas, with the root at the top.
-    """
+    """ draw a plan tree on a canvas, with the root at the top. """
     # clear any previous drawing
     canvas.delete("all")
     if root is None:
@@ -111,7 +103,7 @@ def draw_tree(canvas: tk.Canvas, root) -> None:
     positions = layout_tree(root)
     text_w = BOX_W - 2 * BOX_PAD
 
-    # 1. Create each node's text (name on top, conditions below) and measure it
+    # 1. create each node's text (name on top, conditions below) and measure it
     texts, heights = {}, {}
     for node in root.walk():
         header = canvas.create_text(0, 0, text=node.label(), width=text_w,
@@ -126,7 +118,7 @@ def draw_tree(canvas: tk.Canvas, root) -> None:
         texts[id(node)] = (header, detail)
         heights[id(node)] = height + 2 * BOX_PAD
 
-    # 2. Each tree level is as tall as its tallest box
+    # 2. find tallest box in each level and set height to match it
     depth_count = max(depth for _, depth in positions.values()) + 1
     row_h = [0] * depth_count
     for node in root.walk():
@@ -137,15 +129,13 @@ def draw_tree(canvas: tk.Canvas, root) -> None:
         row_top.append(row_top[-1] + h + ROW_GAP)
 
     def box(node):
-        """
-        Return the (left, top, right, bottom) canvas coordinates of a node's box.
-        """
+        """ return the (left, top, right, bottom) canvas coordinates of a node's box """
         column, depth = positions[id(node)]
         left = MARGIN + column * X_GAP
         top = row_top[depth]
         return left, top, left + BOX_W, top + heights[id(node)]
 
-    # 3. Position the text, then draw boxes and lines underneath it
+    # 3. position the text, draw boxes and lines
     for node in root.walk():
         left, top, right, bottom = box(node)
         header, detail = texts[id(node)]
@@ -169,37 +159,32 @@ def draw_tree(canvas: tk.Canvas, root) -> None:
 # ---------------------------------------------------------------------------
 class App:
     def __init__(self, root: tk.Tk):
-        """
-        Set up the window and widgets
-        """
+        """ set up the window and widgets """
         self.root = root
         root.title("Query Plan Comparison: PostgreSQL vs AI")
         root.geometry("1300x900")
         self.results = queue.Queue()
         self.fields: dict = {}
-        self.raw: dict = {}                           # last EXPLAIN output / prompt / reply
+        self.raw: dict = {}             # to store the response from PSQL and LLM, and the prompt sent
         self.raw_buttons: dict = {}
         self._build_widgets()
 
-    # ---- widgets ----------------------------------------------------------
     def _build_widgets(self):
-        """
-        Create the connection fields, query box, buttons, legend, the two
-        plan canvases and the differences panel.
-        """
+        """ creates the widgets (textbox, canvas, buttons etc.) in UI """
         cfg = pp.DBConfig.from_env()
         top = ttk.LabelFrame(self.root, text="Connection")
         top.pack(fill="x", padx=8, pady=4)
 
         # (label, field name, default value) for each connection input
-        entries = [("Host", "host", cfg.host), 
-                   ("Port", "port", cfg.port),
-                   ("Database", "dbname", cfg.dbname), 
-                   ("Schema", "schema", cfg.schema),
-                   ("User", "user", cfg.user), 
-                   ("Password", "password", cfg.password),
-                   ("LLM API key", "api_key", 
-                    os.environ.get("GEMINI_API_KEY", ""))
+        entries = [
+            ("Host", "host", cfg.host), 
+            ("Port", "port", cfg.port),
+            ("Database", "dbname", cfg.dbname), 
+            ("Schema", "schema", cfg.schema),
+            ("User", "user", cfg.user), 
+            ("Password", "password", cfg.password),
+            ("LLM API key", "api_key", 
+            os.environ.get("GEMINI_API_KEY", ""))
         ]
         for i, (label, name, default) in enumerate(entries):
             ttk.Label(top, text=label).grid(row=0, column=2 * i, padx=(6, 2), sticky="e")
@@ -208,9 +193,7 @@ class App:
             ttk.Entry(top, textvariable=var, width=11, show=show).grid(row=0, column=2 * i + 1)
             self.fields[name] = var
 
-        # query box and the plan area share a vertical PanedWindow, so the
-        # sash between them can be adjusted without either being fully dragged shut.
-        # classic tk.PanedWindow used (not ttk) because it supports a per-pane minsize
+        # query box and the plan area share a vertical PanedWindow so both can be adjustable without being fully dragged shut.
         vpanes = tk.PanedWindow(self.root, orient="vertical", sashwidth=6,
                                 sashrelief="raised", showhandle=False, borderwidth=0)
         vpanes.pack(fill="both", expand=True, padx=8, pady=4)
@@ -257,8 +240,7 @@ class App:
         self.pg_canvas = self._make_canvas(panes, "PostgreSQL plan")
         self.llm_canvas = self._make_canvas(panes, "AI plan")
 
-        # Minimum heights: the query pane keeps its buttons plus a few lines of
-        # text visible; the plan pane keeps a usable strip of diagram visible.
+        # sets minimum heights on the vertical panes to prevent full minimization
         self.root.update_idletasks()
         line = tkfont.nametofont("TkFixedFont").metrics("linespace")
         query_min = buttons.winfo_reqheight() + 5 * line + 40   # + frame label/padding
@@ -274,15 +256,13 @@ class App:
         self.diff_text = tk.Text(dframe, height=7, wrap="word", state="disabled")
         self.diff_text.pack(fill="x", padx=4, pady=4)
 
-        # Stop the window itself being shrunk so far that a pane gets squashed.
+        # stop the window itself being shrunk so far that a pane gets squashed.
         self.root.update_idletasks()
         others = self.root.winfo_reqheight() - vpanes.winfo_reqheight()
         self.root.minsize(600, others + self._vpanes_min)
 
     def _make_canvas(self, panes, title):
-        """
-        Create a scrollable canvas for one plan tree.
-        """
+        """create a scrollable canvas a plan tree"""
         frame = ttk.LabelFrame(panes, text=title)
         panes.add(frame, weight=1)
         canvas = tk.Canvas(frame, bg="white")
@@ -293,44 +273,42 @@ class App:
         ybar.pack(side="right", fill="y")
         canvas.pack(fill="both", expand=True)
 
-        # Mouse wheel scrolls vertically, Shift + wheel horizontally (Windows / macOS)
+        # add mousewheel scrolling
         canvas.bind("<MouseWheel>", lambda e: canvas.yview_scroll(-1 * (e.delta // 120 or (1 if e.delta > 0 else -1)), "units"))
         canvas.bind("<Shift-MouseWheel>", lambda e: canvas.xview_scroll(-1 * (e.delta // 120 or (1 if e.delta > 0 else -1)), "units"))
         
-        # Linux reports the wheel as buttons 4 and 5
-        canvas.bind("<Button-4>", lambda e: canvas.yview_scroll(-1, "units"))
-        canvas.bind("<Button-5>", lambda e: canvas.yview_scroll(1, "units"))
         return canvas
 
-    # ---- actions ----------------------------------------------------------
     def on_demo(self):
-        """Compare and display the built-in sample plans (no database or LLM needed)."""
+        """compare and display the built-in sample plan"""
         pg, llm = pp.sample_plans()
         self._set_raw({})                             # demo plans have no raw DB / LLM data
         self.show(pg, llm, comparison.compare_plans(pg, llm))
         self.status_var.set("Showing built-in demo plans.")
 
     def on_compare(self):
-        """
-        Reads the query and connection settings, then fetches and compares
-        the plans in a background thread while the GUI polls for the result.
-        """
+        """ reads query and configuration options then fetches and compares plans in bg-thread"""
+        # clear previous results if any
         self._clear_results()
+
+        # read query
         query = self.query_text.get("1.0", "end").strip()
         if not query:
             self.status_var.set("Please enter an SQL query.")
             return
+
+        # read DB connection settings
         values = {name: var.get().strip() for name, var in self.fields.items()}
         values["use_stats"] = self.stats_var.get()
         self.compare_button.state(["disabled"])
         self.status_var.set("Fetching plans...")
+
+        # poll
         threading.Thread(target=self._worker, args=(query, values), daemon=True).start()
         self.root.after(100, self._poll)
 
     def _clear_results(self):
-        """
-        Remove the previous plans and differences so stale results are not shown.
-        """
+        """helper function to remove the previous plans and differences."""
         draw_tree(self.pg_canvas, None)
         draw_tree(self.llm_canvas, None)
         self.pg_canvas.configure(scrollregion=(0, 0, 0, 0))
@@ -341,9 +319,7 @@ class App:
         self.diff_text.configure(state="disabled")
 
     def _worker(self, query, values):
-        """
-        helper function to fetch both plans and compare them (runs in a background thread).
-        """
+        """helper function to fetch both plans and compare them (runs in a background thread)."""
         conn = None
         # Raw intermediate data, kept even if a later step fails
         raw = {"explain": None, "prompt": None, "reply": None}
@@ -375,9 +351,7 @@ class App:
                 conn.close()
 
     def _poll(self):
-        """
-        Check every 100 ms whether the background thread has finished
-        """
+        """check every 100 ms whether the background thread has finished"""
         try:
             message = self.results.get_nowait()
         except queue.Empty:
@@ -432,9 +406,7 @@ class App:
         box.configure(state="disabled")
 
     def show(self, pg_plan, llm_plan, result):
-        """
-        Display two compared plans and their differences.
-        """
+        """Display two compared plans and their differences."""
         draw_tree(self.pg_canvas, pg_plan)
         draw_tree(self.llm_canvas, llm_plan)
         self.rate_var.set(
