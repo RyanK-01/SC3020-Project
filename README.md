@@ -177,6 +177,21 @@ Every compared node counts once. `matched` is a node found in both plans (it cou
 is only in the AI plan. 0% means the plans are identical and 100% means they have
 nothing in common. It measures nodes, not tree edit distance.
 
+### Statistics sent to the AI
+
+Besides the tables, columns and indexes, the prompt can include the table sizes
+PostgreSQL's own planner works from (`pg_class`): the estimated rows and pages of each
+table in the query, so the AI can compare the sizes of its inputs instead of guessing.
+
+Only tables whose names appear in the query are included, to keep the prompt short.
+These are inputs to the planner; nothing from PostgreSQL's plan (costs or row estimates
+of the query) is sent. A table that was never analyzed is shown as
+"statistics unavailable", so run `ANALYZE` first (section 3.3).
+
+The statistics are on by default. Untick **Send statistics to AI** in the GUI (or pass
+`--no-stats` in batch mode) to send the schema only. The two prompts are cached
+separately, so both variants can be run on the same queries and compared.
+
 ### Batch mode (many queries, no GUI)
 
 To evaluate many queries at once, put them in a `.sql` file (queries end with `;`,
@@ -202,6 +217,14 @@ difference occurred.
 | `--retries N` | `3` | retries (waiting 20 s, 40 s, ...) when the API reports a rate limit |
 | `--host --port --dbname --user --password --schema` | environment / defaults | database connection |
 | `--api-key KEY` | `GEMINI_API_KEY` | LLM API key |
+| `--no-stats` | (statistics sent) | send only the schema to the AI, without the table sizes |
+
+To measure the effect of the statistics, run the same file twice:
+
+```
+python project.py --batch example_queries.sql --out results_stats.csv
+python project.py --batch example_queries.sql --out results_schema_only.csv --no-stats
+```
 
 AI answers are cached in `.llm_cache`, so re-running a batch does not call the AI again
 for queries it has already answered (delete the folder to start fresh).
@@ -213,7 +236,7 @@ for queries it has already answered (delete the folder to start fresh).
 | `project.py` | entry point: starts the GUI, or calls `batch.py` when `--batch` names an existing file |
 | `batch.py` | batch mode: runs every query in a `.sql` file without the GUI, writes `results.csv` and prints a summary |
 | `interface.py` | Tkinter GUI: inputs, the two plan trees, the differences panel |
-| `preprocessing.py` | reads the schema, runs `EXPLAIN (FORMAT JSON)`, builds the LLM prompt, calls the LLM, converts both plans to one tree format |
+| `preprocessing.py` | reads the schema and the planner statistics, runs `EXPLAIN (FORMAT JSON)`, builds the LLM prompt, calls the LLM, converts both plans to one tree format |
 | `comparison.py` | matches nodes between the two plans, classifies the differences, computes the rate |
 | `tpch_schema.sql` | CREATE TABLE statements for the TPC-H database |
 | `example_queries.sql` | eight example queries |

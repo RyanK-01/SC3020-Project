@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import queue
+import re
 import threading
 import tkinter as tk
 from tkinter import font as tkfont
@@ -29,14 +30,50 @@ RAW_VIEWS = {
     "reply":   "View LLM response",
 }
 
-# Tree drawing sizes, in pixels
-BOX_W, BOX_H = 150, 52
-X_GAP, Y_GAP = 170, 76
+# Tree drawing sizes, in pixels. Box heights grow to fit the node's text, and
+# every row of the tree is as tall as its tallest box.
+BOX_W = 200
+X_GAP = 210          # horizontal distance between neighbouring leaf columns
+ROW_GAP = 28         # vertical space between the bottom of a row and the next row
+BOX_PAD = 6          # padding between a box's border and its text
 MARGIN = 20
+MAX_COND_CHARS = 90  # longer condition text is cut off with "..."
+
+HEADER_FONT = ("TkTextFont", 9, "bold")
+DETAIL_FONT = ("TkTextFont", 8)
+
+# Splits PlanNode.conditions ("Hash Cond: x; Filter: y") back into its parts
+_COND_SPLIT = re.compile(
+    r"; (?=(?:" + "|".join(re.escape(k) for k in pp._CONDITION_KEYS) + r"): )")
+# PostgreSQL type casts such as ::date, ::text or ::timestamp without time zone
+_CAST = re.compile(r"::(?:timestamp|time)(?: with(?:out)? time zone)?"
+                   r"|::(?:character varying|double precision)"
+                   r"|::[a-z_]+(?:\[\])?")
 
 # ---------------------------------------------------------------------------
 # Tree layout and drawing
 # ---------------------------------------------------------------------------
+def condition_lines(node) -> list:
+    """
+    Build the "key: condition" lines shown under a node's name: the filter,
+    index, join (hash / merge) and sort conditions that apply to it.
+    """
+    lines = []
+    if node.conditions:
+        for part in _COND_SPLIT.split(node.conditions):
+            key, _, value = part.partition(": ")
+            lines.append((key, value))
+    if node.sort_key:
+        lines.append(("Sort Key", node.sort_key))
+
+    result = []
+    for key, value in lines:
+        value = _CAST.sub("", value).strip()        # casts only add clutter in a small box
+        if len(value) > MAX_COND_CHARS:
+            value = value[:MAX_COND_CHARS - 3].rstrip() + "..."
+        result.append(f"{key}: {value}")
+    return result
+
 def layout_tree(root) -> dict:
     """
     Compute a grid position for every node of a plan tree.
@@ -72,28 +109,60 @@ def draw_tree(canvas: tk.Canvas, root) -> None:
     if root is None:
         return
     positions = layout_tree(root)
+    text_w = BOX_W - 2 * BOX_PAD
 
-    def centre(node):
+    # 1. Create each node's text (name on top, conditions below) and measure it
+    texts, heights = {}, {}
+    for node in root.walk():
+        header = canvas.create_text(0, 0, text=node.label(), width=text_w,
+                                    justify="center", anchor="n", font=HEADER_FONT)
+        height = canvas.bbox(header)[3] - canvas.bbox(header)[1]
+        detail = None
+        lines = condition_lines(node)
+        if lines:
+            detail = canvas.create_text(0, 0, text="\n".join(lines), width=text_w,
+                                        justify="left", anchor="nw", font=DETAIL_FONT)
+            height += 2 + canvas.bbox(detail)[3] - canvas.bbox(detail)[1]
+        texts[id(node)] = (header, detail)
+        heights[id(node)] = height + 2 * BOX_PAD
+
+    # 2. Each tree level is as tall as its tallest box
+    depth_count = max(depth for _, depth in positions.values()) + 1
+    row_h = [0] * depth_count
+    for node in root.walk():
+        depth = positions[id(node)][1]
+        row_h[depth] = max(row_h[depth], heights[id(node)])
+    row_top = [MARGIN]
+    for h in row_h[:-1]:
+        row_top.append(row_top[-1] + h + ROW_GAP)
+
+    def box(node):
         """
-        Convert a node's grid position into canvas coordinates.
+        Return the (left, top, right, bottom) canvas coordinates of a node's box.
         """
         column, depth = positions[id(node)]
-        return MARGIN + BOX_W / 2 + column * X_GAP, MARGIN + BOX_H / 2 + depth * Y_GAP
+        left = MARGIN + column * X_GAP
+        top = row_top[depth]
+        return left, top, left + BOX_W, top + heights[id(node)]
 
-    for node in root.walk():                       # draw lines first so boxes cover them
-        x1, y1 = centre(node)
-        for child in node.children:
-            x2, y2 = centre(child)
-            canvas.create_line(x1, y1 + BOX_H / 2, x2, y2 - BOX_H / 2, width=1.5)
-
+    # 3. Position the text, then draw boxes and lines underneath it
     for node in root.walk():
-        x, y = centre(node)
-        canvas.create_rectangle(x - BOX_W / 2, y - BOX_H / 2, x + BOX_W / 2, y + BOX_H / 2,
-                                fill=STATUS_COLORS.get(node.status, "white"), outline="#444")
-        canvas.create_text(x, y, text=node.label(), width=BOX_W - 8, justify="center",
-                           font="TkTextFont")
+        left, top, right, bottom = box(node)
+        header, detail = texts[id(node)]
+        canvas.coords(header, (left + right) / 2, top + BOX_PAD)
+        if detail is not None:
+            canvas.coords(detail, left + BOX_PAD, canvas.bbox(header)[3] + 2)
+        rect = canvas.create_rectangle(left, top, right, bottom, outline="#444",
+                                       fill=STATUS_COLORS.get(node.status, "white"))
+        canvas.tag_lower(rect, header)
+        for child in node.children:
+            c_left, c_top, c_right, _ = box(child)
+            line = canvas.create_line((left + right) / 2, bottom,
+                                      (c_left + c_right) / 2, c_top, width=1.5)
+            canvas.tag_lower(line)                 # lines sit behind every box
 
-    canvas.configure(scrollregion=canvas.bbox("all"))
+    x0, y0, x1, y1 = canvas.bbox("all")
+    canvas.configure(scrollregion=(x0 - MARGIN, y0 - MARGIN, x1 + MARGIN, y1 + MARGIN))
 
 # ---------------------------------------------------------------------------
 # Application window
@@ -121,11 +190,17 @@ class App:
         cfg = pp.DBConfig.from_env()
         top = ttk.LabelFrame(self.root, text="Connection")
         top.pack(fill="x", padx=8, pady=4)
+
         # (label, field name, default value) for each connection input
-        entries = [("Host", "host", cfg.host), ("Port", "port", cfg.port),
-                   ("Database", "dbname", cfg.dbname), ("Schema", "schema", cfg.schema),
-                   ("User", "user", cfg.user), ("Password", "password", cfg.password),
-                   ("LLM API key", "api_key", os.environ.get("GEMINI_API_KEY", ""))]
+        entries = [("Host", "host", cfg.host), 
+                   ("Port", "port", cfg.port),
+                   ("Database", "dbname", cfg.dbname), 
+                   ("Schema", "schema", cfg.schema),
+                   ("User", "user", cfg.user), 
+                   ("Password", "password", cfg.password),
+                   ("LLM API key", "api_key", 
+                    os.environ.get("GEMINI_API_KEY", ""))
+        ]
         for i, (label, name, default) in enumerate(entries):
             ttk.Label(top, text=label).grid(row=0, column=2 * i, padx=(6, 2), sticky="e")
             var = tk.StringVar(value=default)
@@ -133,32 +208,38 @@ class App:
             ttk.Entry(top, textvariable=var, width=11, show=show).grid(row=0, column=2 * i + 1)
             self.fields[name] = var
 
-        # The query box and the plan area share a vertical PanedWindow, so the
-        # sash between them can be dragged to make the query box taller/shorter.
-        # The classic tk.PanedWindow is used (not ttk) because it supports a
-        # per-pane minsize, which stops either pane being dragged shut.
+        # query box and the plan area share a vertical PanedWindow, so the
+        # sash between them can be adjusted without either being fully dragged shut.
+        # classic tk.PanedWindow used (not ttk) because it supports a per-pane minsize
         vpanes = tk.PanedWindow(self.root, orient="vertical", sashwidth=6,
                                 sashrelief="raised", showhandle=False, borderwidth=0)
         vpanes.pack(fill="both", expand=True, padx=8, pady=4)
 
-        qframe = ttk.LabelFrame(vpanes, text="SQL Query (drag the bar below to resize)")
-        buttons = ttk.Frame(qframe)
+        query_frame = ttk.LabelFrame(vpanes, text="SQL Query (drag the bar below to resize)")
+        buttons = ttk.Frame(query_frame)
         buttons.pack(side="bottom", fill="x", padx=4, pady=(0, 4))   # stays visible when shrunk
-        qbox = ttk.Frame(qframe)
-        qbox.pack(fill="both", expand=True, padx=4, pady=4)
-        self.query_text = tk.Text(qbox, height=6, font="TkFixedFont", undo=True)
-        qbar = ttk.Scrollbar(qbox, orient="vertical", command=self.query_text.yview)
-        self.query_text.configure(yscrollcommand=qbar.set)
-        qbar.pack(side="right", fill="y")
+
+        query_box = ttk.Frame(query_frame)
+        query_box.pack(fill="both", expand=True, padx=4, pady=4)
+
+        self.query_text = tk.Text(query_box, height=6, font="TkFixedFont", undo=True)
+        query_scrollbar = ttk.Scrollbar(query_box, orient="vertical", command=self.query_text.yview)
+        query_scrollbar.pack(side="right", fill="y")
+        self.query_text.configure(yscrollcommand=query_scrollbar.set)
         self.query_text.pack(fill="both", expand=True)
+        
         self.compare_button = ttk.Button(buttons, text="Compare", command=self.on_compare)
         self.compare_button.pack(side="left")
-        ttk.Button(buttons, text="Load demo plans (no DB / LLM)",
-                   command=self.on_demo).pack(side="left", padx=6)
+        ttk.Button(buttons, text="Load demo plans (no DB / LLM)", command=self.on_demo).pack(side="left", padx=6)
+        
+        # checkbox to add stats to prompt to AI
+        self.stats_var = tk.BooleanVar(value=True)
+        ttk.Checkbutton(buttons, text="Send statistics to AI", variable=self.stats_var).pack(side="left", padx=6)
         ttk.Separator(buttons, orient="vertical").pack(side="left", fill="y", padx=6)
+        
+        # buttons to view debugging / additional info
         for key, title in RAW_VIEWS.items():
-            button = ttk.Button(buttons, text=title,
-                                command=lambda k=key: self.show_raw(k))
+            button = ttk.Button(buttons, text=title, command=lambda k=key: self.show_raw(k))
             button.pack(side="left", padx=2)
             button.state(["disabled"])                # enabled once there is data
             self.raw_buttons[key] = button
@@ -169,8 +250,7 @@ class App:
         legend = ttk.Frame(plan_area)
         legend.pack(fill="x", pady=(4, 0))
         for status, text in LEGEND:
-            tk.Label(legend, text=f" {text} ", bg=STATUS_COLORS[status],
-                     relief="solid", borderwidth=1).pack(side="left", padx=4, pady=2)
+            tk.Label(legend, text=f" {text} ", bg=STATUS_COLORS[status], relief="solid", borderwidth=1).pack(side="left", padx=4, pady=2)
 
         panes = ttk.PanedWindow(plan_area, orient="horizontal")
         panes.pack(fill="both", expand=True, pady=(4, 0))
@@ -183,7 +263,7 @@ class App:
         line = tkfont.nametofont("TkFixedFont").metrics("linespace")
         query_min = buttons.winfo_reqheight() + 5 * line + 40   # + frame label/padding
         plan_min = legend.winfo_reqheight() + 180
-        vpanes.add(qframe, minsize=query_min, stretch="never")
+        vpanes.add(query_frame, minsize=query_min, stretch="never")
         vpanes.add(plan_area, minsize=plan_min, stretch="always")
         self._vpanes_min = query_min + plan_min + 6             # + sash width
 
@@ -212,9 +292,11 @@ class App:
         xbar.pack(side="bottom", fill="x")
         ybar.pack(side="right", fill="y")
         canvas.pack(fill="both", expand=True)
+
         # Mouse wheel scrolls vertically, Shift + wheel horizontally (Windows / macOS)
         canvas.bind("<MouseWheel>", lambda e: canvas.yview_scroll(-1 * (e.delta // 120 or (1 if e.delta > 0 else -1)), "units"))
         canvas.bind("<Shift-MouseWheel>", lambda e: canvas.xview_scroll(-1 * (e.delta // 120 or (1 if e.delta > 0 else -1)), "units"))
+        
         # Linux reports the wheel as buttons 4 and 5
         canvas.bind("<Button-4>", lambda e: canvas.yview_scroll(-1, "units"))
         canvas.bind("<Button-5>", lambda e: canvas.yview_scroll(1, "units"))
@@ -233,38 +315,61 @@ class App:
         Reads the query and connection settings, then fetches and compares
         the plans in a background thread while the GUI polls for the result.
         """
+        self._clear_results()
         query = self.query_text.get("1.0", "end").strip()
         if not query:
             self.status_var.set("Please enter an SQL query.")
             return
         values = {name: var.get().strip() for name, var in self.fields.items()}
+        values["use_stats"] = self.stats_var.get()
         self.compare_button.state(["disabled"])
         self.status_var.set("Fetching plans...")
         threading.Thread(target=self._worker, args=(query, values), daemon=True).start()
         self.root.after(100, self._poll)
 
+    def _clear_results(self):
+        """
+        Remove the previous plans and differences so stale results are not shown.
+        """
+        draw_tree(self.pg_canvas, None)
+        draw_tree(self.llm_canvas, None)
+        self.pg_canvas.configure(scrollregion=(0, 0, 0, 0))
+        self.llm_canvas.configure(scrollregion=(0, 0, 0, 0))
+        self.rate_var.set("Difference rate: -")
+        self.diff_text.configure(state="normal")
+        self.diff_text.delete("1.0", "end")
+        self.diff_text.configure(state="disabled")
+
     def _worker(self, query, values):
         """
-        Fetch both plans and compare them (runs in a background thread).
+        helper function to fetch both plans and compare them (runs in a background thread).
         """
         conn = None
         # Raw intermediate data, kept even if a later step fails
         raw = {"explain": None, "prompt": None, "reply": None}
         try:
-            cfg = pp.DBConfig(host=values["host"], port=values["port"],
-                              dbname=values["dbname"], user=values["user"],
-                              password=values["password"], schema=values["schema"])
+            cfg = pp.DBConfig(
+                host=values["host"], 
+                port=values["port"],
+                dbname=values["dbname"], 
+                user=values["user"],
+                password=values["password"], 
+                schema=values["schema"]
+            )
             conn = pp.connect_db(cfg)
             schema = pp.get_schema(conn, cfg.schema)
             pg_plan, raw["explain"] = pp.get_postgres_plan(conn, query, cfg.schema)
-            llm_plan, raw["prompt"], raw["reply"] = pp.get_llm_plan(
-                query, schema, values["api_key"] or None)
+            stats = pp.get_stats(conn, cfg.schema, query) if values["use_stats"] else None
+            
+            llm_plan, raw["prompt"], raw["reply"] = pp.get_llm_plan(query, schema, values["api_key"] or None, stats)
             result = comparison.compare_plans(pg_plan, llm_plan)
             self.results.put(("ok", raw, pg_plan, llm_plan, result))
+
         except Exception as exc:                      # shown to the user, not swallowed
             if isinstance(exc, pp.LLMError):          # keep the prompt / reply for inspection
                 raw["prompt"], raw["reply"] = exc.prompt, exc.reply
             self.results.put(("error", raw, str(exc)))
+        
         finally:
             if conn is not None:
                 conn.close()
@@ -333,9 +438,12 @@ class App:
         draw_tree(self.pg_canvas, pg_plan)
         draw_tree(self.llm_canvas, llm_plan)
         self.rate_var.set(
-            f"Difference rate: {result.rate:.0%}   (changed {result.changed}, "
-            f"only in PostgreSQL {result.missing}, only in AI {result.extra}, "
-            f"matched {result.matched})")
+            f"Difference rate: {result.rate:.0%} \n"
+            f" - Changed: {result.changed} \n" 
+            f" - Only in PostgreSQL: {result.missing} \n" 
+            f" - Only in AI: {result.extra} \n"
+            f" - Matched: {result.matched}")
+        
         # The text box is read-only; enable it briefly to replace its contents
         self.diff_text.configure(state="normal")
         self.diff_text.delete("1.0", "end")

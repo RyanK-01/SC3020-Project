@@ -6,6 +6,7 @@ import os
 import re
 import urllib.error
 import urllib.request
+import psycopg2
 from dataclasses import dataclass, field
 from typing import Iterator, Optional
 
@@ -36,6 +37,7 @@ class PlanNode:
     selection: Optional[str] = None     # scan predicates: Filter / Index Cond / Recheck Cond
     join_cond: Optional[str] = None     # join predicates: Hash Cond / Merge Cond / Join Filter / Condition
     partial_mode: Optional[str] = None  # "Partial" or "Finalize" for parallel aggregates
+    sort_key: Optional[str] = None      # Sort Key of Sort / Incremental Sort nodes, for display
 
     status: str = "unchanged"           # unchanged | changed | missing | extra | ignored
 
@@ -148,6 +150,9 @@ def plan_from_dict(d: dict) -> PlanNode:
     conditions = [f"{k}: {d[k]}" for k in _CONDITION_KEYS if d.get(k)]
     selection = " AND ".join(str(d[k]) for k in _SELECTION_KEYS if d.get(k))
     join_cond = " AND ".join(str(d[k]) for k in _JOIN_KEYS if d.get(k))
+    sort_key = d.get("Sort Key")                  # a list in EXPLAIN JSON, maybe a string from the LLM
+    if isinstance(sort_key, list):
+        sort_key = ", ".join(str(k) for k in sort_key)
     return PlanNode(
         node_type=node_type,
         relation=d.get("Relation Name"),
@@ -158,6 +163,7 @@ def plan_from_dict(d: dict) -> PlanNode:
         selection=selection or None,
         join_cond=join_cond or None,
         partial_mode=d.get("Partial Mode"),
+        sort_key=str(sort_key) if sort_key else None,
     )
 
 def plan_from_explain_json(obj) -> PlanNode:
@@ -205,13 +211,14 @@ class DBConfig:
 
 def connect_db(cfg: DBConfig):
     try:
-        import psycopg2  # imported here so the other modules load without psycopg2
-    except ImportError as exc:
-        raise RuntimeError("psycopg2 is not installed. Run: pip install psycopg2-binary") from exc
-    try:
-        return psycopg2.connect(host=cfg.host, port=cfg.port, dbname=cfg.dbname,
-                                user=cfg.user, password=cfg.password,
-                                connect_timeout=10)
+        return psycopg2.connect(
+            host=cfg.host, 
+            port=cfg.port, 
+            dbname=cfg.dbname,
+            user=cfg.user, 
+            password=cfg.password,
+            connect_timeout=10
+        )
     except psycopg2.Error as exc:
         raise RuntimeError(f"Could not connect to PostgreSQL: {exc}") from exc
 
@@ -243,9 +250,63 @@ def schema_to_text(schema: dict) -> str:
     for table, cols in schema["tables"].items():
         lines.append(f"  {table}(" + ", ".join(f"{c} {t}" for c, t in cols) + ")")
     lines.append("INDEXES:")
+
     if schema["indexes"]:
         lines.extend(f"  {d}" for _, d in schema["indexes"])
     else:
+        lines.append("  (none)")
+    return "\n".join(lines)
+
+def get_stats(conn, schema: str = "public", query: Optional[str] = None) -> dict:
+    """
+    obtain the table sizes (estimated rows and pages, from pg_class) of the
+    tables named in the query, or of all tables if none can be found in it.
+
+    Returns:
+        dict: {"tables": {table: {"rows": int or None, "pages": int}}}
+        "rows" is None for a table that has never been analyzed.
+    """
+
+    # retrieves identifier words from the user's SQL query, such as table names
+    # used to decide which tables' sizes are subsequently passed to the LLM later
+    words = set(re.findall(r"[a-z_][a-z0-9_$]*", query.lower())) if query else None
+    try:
+        with conn.cursor() as cur:
+            # --- table sizes ---
+            table_size_query = """SELECT c.relname, c.reltuples, c.relpages
+                                FROM pg_class c
+                                JOIN pg_namespace n ON n.oid = c.relnamespace
+                                WHERE n.nspname = %s AND c.relkind IN ('r', 'p', 'm')
+                                ORDER BY c.relname"""
+            cur.execute(table_size_query, (schema,))
+            
+            sizes = {}
+            for table, rows, pages in cur.fetchall():
+                # checks if table has had ANALYSE run on it before
+                known = rows is not None and rows >= 0 and not (rows == 0 and not pages)
+                sizes[table] = {"rows": int(rows) if known else None, "pages": int(pages or 0)}
+            if words is not None:
+                used = {t for t in sizes if t.lower() in words}
+                if used:
+                    sizes = {t: s for t, s in sizes.items() if t in used}
+    except psycopg2.Error as exc:
+        raise RuntimeError(f"Could not read the statistics: {exc}") from exc
+    finally:
+        conn.rollback()
+
+    return {"tables": sizes}
+
+def stats_to_text(stats: dict) -> str:
+    """
+    Describe the statistics returned by get_stats() as text for the LLM prompt.
+    """
+    lines = ["TABLE STATISTICS (PostgreSQL's estimates from the last ANALYZE):"]
+    for table, size in stats["tables"].items():
+        if size["rows"] is None:
+            lines.append(f"  {table}: statistics unavailable (table not analyzed)")
+        else:
+            lines.append(f"  {table}: {size['rows']} rows, {size['pages']} pages")
+    if not stats["tables"]:
         lines.append("  (none)")
     return "\n".join(lines)
 
@@ -270,7 +331,6 @@ def get_postgres_plan(conn, query: str, schema: str = "public") -> PlanNode:
     if isinstance(raw, str):  # psycopg2 usually decodes the JSON already
         raw = json.loads(raw)
     return plan_from_explain_json(raw), json.dumps(raw, indent=2)
-
 
 # ---------------------------------------------------------------------------
 # 5. LLM access (Google Gemini REST API)
@@ -306,10 +366,23 @@ Rules:
 - Omit keys that do not apply. Do not include costs or row counts.
 - A Hash Join has two children: the probe side first, then a Hash node
   whose single child is the build side.
+{stats_rule}"""
+
+STATS_RULE = """- Use the estimated table sizes in TABLE STATISTICS above to aid in the plan formulation,
+    using the number of rows produced from each scan and each join produces to choose the appropriate 
+    scan method, join algorithm, join order and hash build side.
 """
 
-def build_prompt(query: str, schema_text: str) -> str:
-    return PROMPT_TEMPLATE.format(schema=schema_text, query=query.strip())
+def build_prompt(query: str, schema_text: str, stats_text: str = "") -> str:
+    """
+    builds the LLM prompt
+    """
+    # append the table statistics if provided as an argument
+    if stats_text:
+        schema_text = schema_text + "\n" + stats_text 
+
+    # builds the final prompt template
+    return PROMPT_TEMPLATE.format(schema=schema_text, query=query.strip(), stats_rule=STATS_RULE if stats_text else "")
 
 def ask_llm(prompt: str, api_key: Optional[str] = None) -> str:
     """
@@ -368,11 +441,19 @@ def extract_json(text: str):
         raise LLMError(f"The LLM reply was not valid JSON: {exc}") from exc
 
 
-def get_llm_plan(query: str, schema: dict, api_key: Optional[str] = None) -> tuple:
+def get_llm_plan(query: str, schema: dict, api_key: Optional[str] = None,
+                 stats: Optional[dict] = None) -> tuple:
     """
     Ask the LLM to predict the execution plan of a query.
+
+    Args:
+        stats: the dict returned by get_stats(), or None to send the schema only.
+
+    Returns:
+        tuple: (plan, prompt, reply).
     """
-    prompt = build_prompt(query, schema_to_text(schema))
+    prompt = build_prompt(query, schema_to_text(schema),
+                          stats_to_text(stats) if stats else "")
     reply = None
     try:
         reply = ask_llm(prompt, api_key)
@@ -409,7 +490,7 @@ def sample_plans():
                         {"Node Type": "Seq Scan", "Relation Name": "part"}]}]}]}]}]}
     llm = {"Node Type": "Aggregate", "Strategy": "Plain", "Plans": [
         {"Node Type": "Hash Join", "Join Type": "Inner",
-         "Condition": "l_partkey = p_partkey", "Plans": [
+         "Hash Cond": "l_partkey = p_partkey", "Plans": [
             {"Node Type": "Index Scan", "Relation Name": "lineitem",
              "Index Name": "idx_lineitem_shipdate",
              "Index Cond": "l_shipdate >= '1993-11-01'"},

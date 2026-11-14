@@ -176,20 +176,17 @@ def join_pairs(text) -> frozenset:
             pairs.add(tuple(sorted(found)))
     return frozenset(pairs)
 
-
 def _cols_text(cols) -> str:
     """
     helper method to format a set of filter columns for a message.
     """
     return ", ".join(sorted(cols)) if cols else "no filter"
 
-
 def _pairs_text(pairs) -> str:
     """
     helper method to format a set of join column pairs for a message.
     """
     return ", ".join(" = ".join(p) for p in sorted(pairs))
-
 
 def _first_child_tables(node: PlanNode) -> frozenset:
     """
@@ -199,7 +196,6 @@ def _first_child_tables(node: PlanNode) -> frozenset:
     side, so comparing between plans shows whether the sides are swapped.
     """
     return node.children[0].tables() if node.children else frozenset()
-
 
 def classify_matched(pg: PlanNode, llm: PlanNode) -> list:
     """
@@ -264,10 +260,9 @@ def classify_matched(pg: PlanNode, llm: PlanNode) -> list:
                 f"the AI plan uses {llm.node_type}.", pg, llm))
             
     elif pg.node_type != llm.node_type:   # not reachable: other keys include the node type
-        found.append(Difference("operator_changed",
-                                f"{pg.node_type} vs {llm.node_type}.", pg, llm))
-    return found
+        found.append(Difference("operator_changed", f"{pg.node_type} vs {llm.node_type}.", pg, llm))
 
+    return found
 
 def describe_unmatched(node: PlanNode, only_in: str) -> Difference:
     """
@@ -316,6 +311,7 @@ def compare_plans(pg_plan: PlanNode, llm_plan: PlanNode) -> ComparisonResult:
             result.missing += 1
             result.differences.append(diff)
             continue
+
         result.matched += 1
         diffs = classify_matched(pg_node, llm_node)
         if diffs:                       # a node is counted once, however many differences it has

@@ -156,7 +156,8 @@ def run_batch(args) -> int:
     conn = pp.connect_db(cfg)
     schema = pp.get_schema(conn, cfg.schema)
     print(f"Running {len(queries)} queries from {args.batch} against "
-          f"{cfg.dbname} (schema {cfg.schema}).")
+          f"{cfg.dbname} (schema {cfg.schema}), "
+          f"{'without' if args.no_stats else 'with'} statistics in the prompt.")
 
     rows = []
     for number, query in enumerate(queries, 1):
@@ -164,12 +165,13 @@ def run_batch(args) -> int:
                "llm_nodes": "", "matched": "", "changed": "", "missing": "", "extra": "",
                "rate": "", "difference_kinds": "", "differences": "", "error": ""}
         try:
-            pg_plan = pp.get_postgres_plan(conn, query, cfg.schema)
+            pg_plan, _ = pp.get_postgres_plan(conn, query, cfg.schema)
+            stats = None if args.no_stats else pp.get_stats(conn, cfg.schema, query)
             llm_plan = None
             for attempt in range(args.retries + 1):
                 started = time.time()
                 try:
-                    llm_plan = pp.get_llm_plan(query, schema, api_key or None)
+                    llm_plan, _, _ = pp.get_llm_plan(query, schema, api_key or None, stats)
                     break
                 except pp.LLMError as exc:
                     # HTTP 429 = API rate limit: wait longer after each attempt and retry
@@ -233,4 +235,6 @@ def parse_args(argv=None):
     for name in ("host", "port", "dbname", "user", "password", "schema"):
         parser.add_argument(f"--{name}", help=f"database {name} (default: environment / built-in)")
     parser.add_argument("--api-key", help="LLM API key (default: GEMINI_API_KEY)")
+    parser.add_argument("--no-stats", action="store_true",
+                        help="send only the schema to the AI, without the table sizes")
     return parser.parse_args(argv)

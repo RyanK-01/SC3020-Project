@@ -4,6 +4,7 @@ test_comparison.py
 Offline checks for comparison.py (no database, no LLM key needed).
 Run:   python -m unittest test_comparison -v
 """
+import importlib.util
 import unittest
 
 import comparison as cmp
@@ -155,6 +156,85 @@ SELECT 3"""
         s = batch.summarize([{"rate": 0.0, "difference_kinds": "", "error": "x"}])
         self.assertIsNone(s["mean_rate"])
         batch.format_summary(s)        # must not raise
+
+
+class _FakeCursor:
+    """Stands in for a psycopg2 cursor: returns canned rows, one list per execute()."""
+    def __init__(self, results):
+        self.results = list(results)
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+    def execute(self, sql, params=None):
+        self.current = self.results.pop(0)
+
+    def fetchall(self):
+        return self.current
+
+
+class _FakeConn:
+    def __init__(self, results):
+        self.results = results
+
+    def cursor(self):
+        return _FakeCursor(self.results)
+
+    def rollback(self):
+        pass
+
+
+# canned catalog rows from pg_class
+_PG_CLASS = [("lineitem", 600000.0, 11000), ("orders", 150000.0, 2500), ("part", -1.0, 0)]
+_QUERY = ("SELECT l_returnflag, count(*) FROM lineitem JOIN orders "
+          "ON l_orderkey = o_orderkey GROUP BY l_returnflag")
+
+
+@unittest.skipUnless(importlib.util.find_spec("psycopg2"), "psycopg2 is not installed")
+class StatsTests(unittest.TestCase):
+    def stats(self, query=_QUERY):
+        return pp.get_stats(_FakeConn([_PG_CLASS]), "public", query)
+
+    def test_only_tables_in_the_query_are_kept(self):
+        stats = self.stats()
+        self.assertEqual(list(stats), ["tables"])        # table sizes only
+        self.assertEqual(list(stats["tables"]), ["lineitem", "orders"])
+
+    def test_all_tables_are_kept_when_none_is_named(self):
+        self.assertEqual(len(self.stats("SELECT 1")["tables"]), 3)
+        self.assertEqual(len(self.stats(None)["tables"]), 3)
+
+    def test_unanalyzed_table_has_no_row_count(self):
+        stats = self.stats(None)
+        self.assertIsNone(stats["tables"]["part"]["rows"])
+        self.assertIn("part: statistics unavailable", pp.stats_to_text(stats))
+
+    def test_stats_text(self):
+        text = pp.stats_to_text(self.stats())
+        self.assertIn("lineitem: 600000 rows, 11000 pages", text)
+        self.assertIn("orders: 150000 rows, 2500 pages", text)
+        self.assertNotIn("COLUMN STATISTICS", text)
+        self.assertNotIn("KEYS", text)
+
+    def test_empty_stats_text(self):
+        text = pp.stats_to_text({"tables": {}})
+        self.assertEqual(text.count("(none)"), 1)
+
+
+class PromptTests(unittest.TestCase):
+    def test_prompt_without_stats_is_the_schema_only_prompt(self):
+        prompt = pp.build_prompt("SELECT 1", "TABLES:\n  t(a integer)")
+        self.assertNotIn("STATISTICS", prompt)
+        self.assertTrue(prompt.endswith("whose single child is the build side.\n"))
+
+    def test_prompt_with_stats(self):
+        prompt = pp.build_prompt("SELECT 1", "TABLES:\n  t(a integer)",
+                                 "TABLE STATISTICS:\n  t: 5 rows, 1 pages")
+        self.assertIn("t: 5 rows, 1 pages\n\nQUERY:", prompt)
+        self.assertIn("Use the estimated table sizes in TABLE STATISTICS", prompt)
 
 
 if __name__ == "__main__":
