@@ -1,15 +1,3 @@
-"""
-interface.py
-============
-Tkinter GUI (ships with Python on Windows).
-
-Layout: connection + query inputs on top, the two plan trees side by side
-(colour coded), and a text panel listing every difference at the bottom.
-
-The slow work (database + LLM) runs in a background thread so the window
-does not freeze; results come back through a queue.
-"""
-
 from __future__ import annotations
 
 import os
@@ -21,10 +9,10 @@ from tkinter import ttk
 import comparison
 import preprocessing as pp
 
-# Colours by PlanNode.status
+# Box colour for each PlanNode.status
 STATUS_COLORS = {
     "unchanged": "#c8e6c9",   # green  - same in both plans
-    "changed":   "#ffe0b2",   # orange - same piece of work, different operator
+    "changed":   "#ffe0b2",   # orange - same work, different operator
     "missing":   "#ffcdd2",   # red    - only in PostgreSQL's plan
     "extra":     "#bbdefb",   # blue   - only in the AI plan
     "ignored":   "#eeeeee",   # grey   - helper / parallel node, not compared
@@ -33,6 +21,7 @@ LEGEND = [("unchanged", "Same in both"), ("changed", "Different operator"),
           ("missing", "Only in PostgreSQL"), ("extra", "Only in AI plan"),
           ("ignored", "Not compared (Hash / Gather)")]
 
+# Tree drawing sizes, in pixels
 BOX_W, BOX_H = 150, 52
 X_GAP, Y_GAP = 170, 76
 MARGIN = 20
@@ -43,13 +32,18 @@ MARGIN = 20
 # ---------------------------------------------------------------------------
 def layout_tree(root) -> dict:
     """
-    Return {id(node): (column, depth)}. Leaves get consecutive columns and a
-    parent sits at the average column of its children.
+    Compute a grid position for every node of a plan tree.
+
+    Leaves are placed in consecutive columns from left to right, and each
+    parent is centred above its children.
     """
     positions: dict = {}
     next_column = [0]
 
     def place(node, depth):
+        """
+        Place a node and its subtree.
+        """
         if not node.children:
             column = float(next_column[0])
             next_column[0] += 1
@@ -62,19 +56,24 @@ def layout_tree(root) -> dict:
     place(root, 0)
     return positions
 
-
 def draw_tree(canvas: tk.Canvas, root) -> None:
-    """Draw a PlanNode tree onto a canvas, root at the top."""
+    """
+    Draw a plan tree on a canvas, with the root at the top.
+    """
+    # clear any previous drawing
     canvas.delete("all")
     if root is None:
         return
     positions = layout_tree(root)
 
     def centre(node):
+        """
+        Convert a node's grid position into canvas coordinates.
+        """
         column, depth = positions[id(node)]
         return MARGIN + BOX_W / 2 + column * X_GAP, MARGIN + BOX_H / 2 + depth * Y_GAP
 
-    for node in root.walk():                       # lines first, boxes on top
+    for node in root.walk():                       # draw lines first so boxes cover them
         x1, y1 = centre(node)
         for child in node.children:
             x2, y2 = centre(child)
@@ -89,12 +88,14 @@ def draw_tree(canvas: tk.Canvas, root) -> None:
 
     canvas.configure(scrollregion=canvas.bbox("all"))
 
-
 # ---------------------------------------------------------------------------
 # Application window
 # ---------------------------------------------------------------------------
 class App:
     def __init__(self, root: tk.Tk):
+        """
+        Set up the window and widgets
+        """
         self.root = root
         root.title("Query Plan Comparison: PostgreSQL vs AI")
         root.geometry("1300x900")
@@ -104,9 +105,14 @@ class App:
 
     # ---- widgets ----------------------------------------------------------
     def _build_widgets(self):
+        """
+        Create the connection fields, query box, buttons, legend, the two
+        plan canvases and the differences panel.
+        """
         cfg = pp.DBConfig.from_env()
         top = ttk.LabelFrame(self.root, text="Connection")
         top.pack(fill="x", padx=8, pady=4)
+        # (label, field name, default value) for each connection input
         entries = [("Host", "host", cfg.host), ("Port", "port", cfg.port),
                    ("Database", "dbname", cfg.dbname), ("Schema", "schema", cfg.schema),
                    ("User", "user", cfg.user), ("Password", "password", cfg.password),
@@ -114,7 +120,7 @@ class App:
         for i, (label, name, default) in enumerate(entries):
             ttk.Label(top, text=label).grid(row=0, column=2 * i, padx=(6, 2), sticky="e")
             var = tk.StringVar(value=default)
-            show = "*" if name in ("password", "api_key") else ""
+            show = "*" if name in ("password", "api_key") else ""   # hide secrets
             ttk.Entry(top, textvariable=var, width=11, show=show).grid(row=0, column=2 * i + 1)
             self.fields[name] = var
 
@@ -150,6 +156,9 @@ class App:
         self.diff_text.pack(fill="x", padx=4, pady=4)
 
     def _make_canvas(self, panes, title):
+        """
+        Create a scrollable canvas for one plan tree.
+        """
         frame = ttk.LabelFrame(panes, text=title)
         panes.add(frame, weight=1)
         canvas = tk.Canvas(frame, bg="white")
@@ -159,20 +168,26 @@ class App:
         xbar.pack(side="bottom", fill="x")
         ybar.pack(side="right", fill="y")
         canvas.pack(fill="both", expand=True)
-        # mouse wheel scrolls (Shift + wheel scrolls sideways)
+        # Mouse wheel scrolls vertically, Shift + wheel horizontally (Windows / macOS)
         canvas.bind("<MouseWheel>", lambda e: canvas.yview_scroll(-1 * (e.delta // 120 or (1 if e.delta > 0 else -1)), "units"))
         canvas.bind("<Shift-MouseWheel>", lambda e: canvas.xview_scroll(-1 * (e.delta // 120 or (1 if e.delta > 0 else -1)), "units"))
-        canvas.bind("<Button-4>", lambda e: canvas.yview_scroll(-1, "units"))   # Linux
+        # Linux reports the wheel as buttons 4 and 5
+        canvas.bind("<Button-4>", lambda e: canvas.yview_scroll(-1, "units"))
         canvas.bind("<Button-5>", lambda e: canvas.yview_scroll(1, "units"))
         return canvas
 
     # ---- actions ----------------------------------------------------------
     def on_demo(self):
+        """Compare and display the built-in sample plans (no database or LLM needed)."""
         pg, llm = pp.sample_plans()
         self.show(pg, llm, comparison.compare_plans(pg, llm))
         self.status_var.set("Showing built-in demo plans.")
 
     def on_compare(self):
+        """
+        Reads the query and connection settings, then fetches and compares
+        the plans in a background thread while the GUI polls for the result.
+        """
         query = self.query_text.get("1.0", "end").strip()
         if not query:
             self.status_var.set("Please enter an SQL query.")
@@ -184,7 +199,9 @@ class App:
         self.root.after(100, self._poll)
 
     def _worker(self, query, values):
-        """Runs in a background thread - must not touch any widget."""
+        """
+        Fetch both plans and compare them (runs in a background thread).
+        """
         conn = None
         try:
             cfg = pp.DBConfig(host=values["host"], port=values["port"],
@@ -196,13 +213,16 @@ class App:
             llm_plan = pp.get_llm_plan(query, schema, values["api_key"] or None)
             result = comparison.compare_plans(pg_plan, llm_plan)
             self.results.put(("ok", pg_plan, llm_plan, result))
-        except Exception as exc:                      # shown to the user, not swallowed
+        except Exception as exc:                      # report any failure in the status bar
             self.results.put(("error", str(exc)))
         finally:
             if conn is not None:
                 conn.close()
 
     def _poll(self):
+        """
+        Check every 100 ms whether the background thread has finished
+        """
         try:
             message = self.results.get_nowait()
         except queue.Empty:
@@ -217,12 +237,16 @@ class App:
             self.status_var.set("Done.")
 
     def show(self, pg_plan, llm_plan, result):
+        """
+        Display two compared plans and their differences.
+        """
         draw_tree(self.pg_canvas, pg_plan)
         draw_tree(self.llm_canvas, llm_plan)
         self.rate_var.set(
             f"Difference rate: {result.rate:.0%}   (changed {result.changed}, "
             f"only in PostgreSQL {result.missing}, only in AI {result.extra}, "
             f"matched {result.matched})")
+        # The text box is read-only; enable it briefly to replace its contents
         self.diff_text.configure(state="normal")
         self.diff_text.delete("1.0", "end")
         if result.differences:
@@ -232,12 +256,8 @@ class App:
             self.diff_text.insert("end", "The two plans are equivalent.\n")
         self.diff_text.configure(state="disabled")
 
-
 def launch_gui():
+    """Create the main window and run the Tkinter event loop."""
     root = tk.Tk()
     App(root)
     root.mainloop()
-
-
-if __name__ == "__main__":
-    launch_gui()

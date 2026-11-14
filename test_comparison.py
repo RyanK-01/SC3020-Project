@@ -8,7 +8,7 @@ import unittest
 
 import comparison as cmp
 import preprocessing as pp
-import project
+import batch
 
 
 def scan(table, **extra):
@@ -132,7 +132,7 @@ SELECT 'a;b' FROM t -- trailing comment
 WHERE x = 1;
 
 SELECT 3"""
-        queries = project.split_queries(text)
+        queries = batch.split_queries(text)
         self.assertEqual(len(queries), 3)
         self.assertIn("'a;b'", queries[1])
         self.assertNotIn("comment", queries[1])
@@ -144,17 +144,17 @@ SELECT 3"""
             {"rate": 0.5, "difference_kinds": "scan_method; scan_method; join_order", "error": ""},
             {"rate": 0.0, "difference_kinds": "", "error": "boom"},
         ]
-        s = project.summarize(rows)
+        s = batch.summarize(rows)
         self.assertEqual((s["queries"], s["succeeded"], s["failed"], s["identical"]), (3, 2, 1, 1))
         self.assertAlmostEqual(s["mean_rate"], 0.25)
         self.assertEqual(s["kind_queries"], {"scan_method": 1, "join_order": 1})
         self.assertEqual(s["kind_total"]["scan_method"], 2)
-        self.assertIn("mean 25.0%", project.format_summary(s))
+        self.assertIn("mean 25.0%", batch.format_summary(s))
 
     def test_summarize_with_no_successes(self):
-        s = project.summarize([{"rate": 0.0, "difference_kinds": "", "error": "x"}])
+        s = batch.summarize([{"rate": 0.0, "difference_kinds": "", "error": "x"}])
         self.assertIsNone(s["mean_rate"])
-        project.format_summary(s)        # must not raise
+        batch.format_summary(s)        # must not raise
 
 
 if __name__ == "__main__":

@@ -210,13 +210,14 @@ for queries it has already answered (delete the folder to start fresh).
 
 | File | Role |
 |---|---|
-| `project.py` | entry point: starts the GUI, or runs a batch of queries with `--batch` |
+| `project.py` | entry point: starts the GUI, or calls `batch.py` when `--batch` names an existing file |
+| `batch.py` | batch mode: runs every query in a `.sql` file without the GUI, writes `results.csv` and prints a summary |
 | `interface.py` | Tkinter GUI: inputs, the two plan trees, the differences panel |
 | `preprocessing.py` | reads the schema, runs `EXPLAIN (FORMAT JSON)`, builds the LLM prompt, calls the LLM, converts both plans to one tree format |
 | `comparison.py` | matches nodes between the two plans, classifies the differences, computes the rate |
 | `tpch_schema.sql` | CREATE TABLE statements for the TPC-H database |
 | `example_queries.sql` | eight example queries |
-| `test_comparison.py` | offline tests for `comparison.py` |
+| `test_comparison.py` | offline tests for `comparison.py` and the batch helpers |
 
 To run the tests (no database or key needed): `python -m unittest test_comparison -v`
 
