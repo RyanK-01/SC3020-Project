@@ -404,9 +404,3 @@ def sample_plans():
             {"Node Type": "Hash", "Plans": [
                 {"Node Type": "Seq Scan", "Relation Name": "part"}]}]}]}
     return plan_from_dict(pg), plan_from_dict(llm)
-
-
-if __name__ == "__main__":
-    pg_plan, llm_plan = sample_plans()
-    print("PostgreSQL plan:\n" + plan_to_text(pg_plan))
-    print("\nLLM plan:\n" + plan_to_text(llm_plan))
