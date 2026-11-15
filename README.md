@@ -18,6 +18,9 @@ Install the two required packages:
 pip install -r requirements.txt
 ```
 
+Extract the .env file from .env.7z using the password: **bcdpr09**.
+ I
+The .env file comes preconfigured with the provided API key.
 ## (optional) Setting up a .env file
 
 You can type the database connection details and API key straight into the GUI's connection bar each time you run it, so no configuration file is needed.
