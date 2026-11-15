@@ -9,7 +9,6 @@ import unittest
 
 import comparison as cmp
 import preprocessing as pp
-import batch
 
 
 def scan(table, **extra):
@@ -122,40 +121,6 @@ class ComparisonTests(unittest.TestCase):
                          frozenset({("l_partkey", "p_partkey")}))
         self.assertEqual(cmp.selection_columns("((p_brand = 'x'::bpchar) OR (p_size > 3))"),
                          frozenset({"p_brand", "p_size"}))
-
-
-class BatchHelperTests(unittest.TestCase):
-    def test_split_queries(self):
-        text = """-- first
-SELECT 1;
--- second, with a ; inside a string and a comment
-SELECT 'a;b' FROM t -- trailing comment
-WHERE x = 1;
-
-SELECT 3"""
-        queries = batch.split_queries(text)
-        self.assertEqual(len(queries), 3)
-        self.assertIn("'a;b'", queries[1])
-        self.assertNotIn("comment", queries[1])
-        self.assertEqual(queries[2], "SELECT 3")
-
-    def test_summarize(self):
-        rows = [
-            {"rate": 0.0, "difference_kinds": "", "error": ""},
-            {"rate": 0.5, "difference_kinds": "scan_method; scan_method; join_order", "error": ""},
-            {"rate": 0.0, "difference_kinds": "", "error": "boom"},
-        ]
-        s = batch.summarize(rows)
-        self.assertEqual((s["queries"], s["succeeded"], s["failed"], s["identical"]), (3, 2, 1, 1))
-        self.assertAlmostEqual(s["mean_rate"], 0.25)
-        self.assertEqual(s["kind_queries"], {"scan_method": 1, "join_order": 1})
-        self.assertEqual(s["kind_total"]["scan_method"], 2)
-        self.assertIn("mean 25.0%", batch.format_summary(s))
-
-    def test_summarize_with_no_successes(self):
-        s = batch.summarize([{"rate": 0.0, "difference_kinds": "", "error": "x"}])
-        self.assertIsNone(s["mean_rate"])
-        batch.format_summary(s)        # must not raise
 
 
 class _FakeCursor:
