@@ -87,31 +87,6 @@ Node colours:
 | 🟦 Only in AI plan | Blue | Not in PostgreSQL's plan |
 | ⬜ Not compared | Grey | Helper nodes (Hash, Gather, Bitmap Index Scan) left out of the comparison |
 
-## How the comparison works
-
-1. Both plans are parsed into the same tree structure (`PlanNode`). The LLM is asked to answer in the same JSON shape as `EXPLAIN (FORMAT JSON)`.
-2. Helper nodes that do not reflect a planning decision (`Hash`, `Parallel Hash`, `Bitmap Index Scan`, `Gather`, `Gather Merge`, partial aggregates) are ignored.
-3. Each remaining node is given a key from its category and the tables under it. For example, a Seq Scan and an Index Scan of the same table are matched as the same scan, and joins are matched by the set of tables they join.
-4. Matched pairs are checked for differences. Unmatched nodes are reported as missing, extra, or as a different join order.
-
-Kinds of difference reported:
-
-| Kind | Meaning |
-|---|---|
-| `scan_method` | Different scan operator, or same operator on a different index |
-| `scan_condition` | Different columns filtered on (literal values are ignored) |
-| `join_algorithm` | Hash Join vs Merge Join vs Nested Loop |
-| `join_type` | e.g. Inner vs Left |
-| `join_sides` | Build/inner side of a Hash Join or Nested Loop swapped |
-| `join_condition` | Different join predicate |
-| `join_order` | Tables joined in a different order or grouping |
-| `aggregate_strategy` | Plain vs Hash vs Group aggregate |
-| `operator_missing` / `operator_extra` | Operator only in PostgreSQL's plan / only in the AI plan |
-
-**Difference rate** = (changed + missing + extra) / (matched + missing + extra). 0% means the plans are identical after the steps above.
-
-LLM replies are cached in a `.llm_cache/` folder created next to the project files, keyed by model and prompt, so rerunning the same query does not call the API again. Delete the folder to force fresh replies.
-
 ## Project files
 
 | File | Description |
